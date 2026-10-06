@@ -1,0 +1,832 @@
+--- a/Src/processes.f90
++++ b/Src/processes.f90
+@@ -40,6 +40,12 @@
+ 
+   real(kind=8),parameter :: hbarp=hbar*1e22
+ 
++  ! Per-target-mode acoustic/optical composition bookkeeping.  The first
++  ! three branches are acoustic and the remaining three are optical for the
++  ! two-atom primitive cells targeted by this instrumentation.
++  real(kind=8),allocatable :: rate_scatt_ao3(:,:,:)
++  real(kind=8),allocatable :: rate_scatt_ao4(:,:,:)
++
+ contains
+ 
+   ! Compute one of the matrix elements involved in the calculation of Ind_plus.
+@@ -671,6 +677,7 @@
+     integer(kind=4) :: i
+     integer(kind=4) :: ll
+     integer(kind=4) :: mm
++    integer(kind=4) :: event_index,branch2,branch3,nacoustic,ao_channel
+     integer(kind=4) :: maxsize
+     integer(kind=4) :: Ntotal_plus
+     integer(kind=4) :: Ntotal_minus
+@@ -688,6 +695,7 @@
+     real(kind=8),allocatable :: Gamma_minus_reduce(:)
+     real(kind=8) :: WP3_plus_reduce(Nbands*Nlist)
+     real(kind=8) :: WP3_minus_reduce(Nbands*Nlist)
++    real(kind=8) :: rate_scatt_ao3_reduce(4,Nbands,Nlist)
+ 
+     maxsize=max(maxval(N_plus),maxval(N_minus))
+     allocate(Indof2ndPhonon(maxsize))
+@@ -722,6 +730,10 @@
+     WP3_minus=0.d0
+     WP3_plus_reduce=0.d0
+     WP3_minus_reduce=0.d0
++    rate_scatt_ao3_reduce=0.d0
++    if (allocated(rate_scatt_ao3)) deallocate(rate_scatt_ao3)
++    allocate(rate_scatt_ao3(4,Nbands,Nlist))
++    rate_scatt_ao3=0.d0
+ 
+     do mm=myid+1,Nbands*NList,numprocs
+        i=modulo(mm-1,Nbands)+1
+@@ -738,6 +750,13 @@
+           Gamma_plus_reduce((Naccum_plus(mm)+1):(Naccum_plus(mm)+N_plus(mm)))=&
+                Gamma0(1:N_plus(mm))
+           rate_scatt_plus_reduce(i,ll)=sum(Gamma0(1:N_plus(mm)))
++          do event_index=1,N_plus(mm)
++             branch2=modulo(Indof2ndPhonon(event_index)-1,Nbands)+1
++             branch3=modulo(Indof3rdPhonon(event_index)-1,Nbands)+1
++             nacoustic=merge(1,0,i.le.3)+merge(1,0,branch2.le.3)+merge(1,0,branch3.le.3)
++             ao_channel=4-nacoustic
++             rate_scatt_ao3_reduce(ao_channel,i,ll)=rate_scatt_ao3_reduce(ao_channel,i,ll)+Gamma0(event_index)
++          end do
+        end if
+        if(N_minus(mm).ne.0) then
+           call Ind_minus(mm,N_minus(mm),energy,velocity,eigenvect,Nlist,List,&
+@@ -751,6 +770,13 @@
+           Gamma_minus_reduce((Naccum_minus(mm)+1):(Naccum_minus(mm)+N_minus(mm)))=&
+                Gamma0(1:N_minus(mm))
+           rate_scatt_minus_reduce(i,ll)=sum(Gamma0(1:N_minus(mm)))*5.D-1
++          do event_index=1,N_minus(mm)
++             branch2=modulo(Indof2ndPhonon(event_index)-1,Nbands)+1
++             branch3=modulo(Indof3rdPhonon(event_index)-1,Nbands)+1
++             nacoustic=merge(1,0,i.le.3)+merge(1,0,branch2.le.3)+merge(1,0,branch3.le.3)
++             ao_channel=4-nacoustic
++             rate_scatt_ao3_reduce(ao_channel,i,ll)=rate_scatt_ao3_reduce(ao_channel,i,ll)+Gamma0(event_index)*5.d-1
++          end do
+        end if
+     end do
+ 
+@@ -778,6 +804,8 @@
+          MPI_SUM,MPI_COMM_WORLD,ll)
+     call MPI_ALLREDUCE(WP3_minus_reduce,WP3_minus,Nbands*Nlist,MPI_DOUBLE_PRECISION,&
+          MPI_SUM,MPI_COMM_WORLD,ll)
++    call MPI_ALLREDUCE(rate_scatt_ao3_reduce,rate_scatt_ao3,4*Nbands*Nlist,MPI_DOUBLE_PRECISION,&
++         MPI_SUM,MPI_COMM_WORLD,ll)
+     rate_scatt=rate_scatt_plus+rate_scatt_minus
+ 
+     deallocate(Indof2ndPhonon_plus_reduce)
+@@ -1252,7 +1280,7 @@
+   ! RTA-only version of Ind_plus.
+   subroutine RTA_plus(mm,energy,velocity,eigenvect,Nlist,List,&
+        Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+-       Gamma_plus,WP3_plus,Gamma_plus_N,Gamma_plus_U)
++       Gamma_plus,WP3_plus,Gamma_plus_N,Gamma_plus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -1262,11 +1290,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_plus,WP3_plus
+     real(kind=8),intent(out) :: Gamma_plus_N,Gamma_plus_U
++    real(kind=8),intent(out) :: Gamma_ao(4)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),i,j,k
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss
++    integer(kind=4) :: ii,jj,kk,ll,ss,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime
+     real(kind=8) :: omega,omegap,omegadp
+@@ -1277,6 +1306,7 @@
+     Gamma_plus=0.d00
+     Gamma_plus_N=0.d00
+     Gamma_plus_U=0.d00
++    Gamma_ao=0.d00
+ 
+     WP3_plus=0.d00
+   
+@@ -1321,6 +1351,9 @@
+                            realqprime,realqdprime,eigenvect,&
+                            Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k)
+                       Gamma_plus=Gamma_plus+hbarp*pi/4.d0*WP3*abs(Vp)**2
++                      nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)
++                      ao_channel=4-nacoustic
++                      Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*pi/4.d0*WP3*abs(Vp)**2
+                       !======================Normal and Umklapp scattering===========================
+                       !-------- call ws_cell function to distinguish normal and umklapp processes
+                       call ws_cell(q,shortest_q)
+@@ -1347,12 +1380,13 @@
+     Gamma_plus=Gamma_plus*5.60626442*1.d8/nptk ! THz
+     Gamma_plus_N=Gamma_plus_N*5.60626442*1.d8/nptk ! THz
+     Gamma_plus_U=Gamma_plus_U*5.60626442*1.d8/nptk ! THz
++    Gamma_ao=Gamma_ao*5.60626442*1.d8/nptk ! THz
+   end subroutine RTA_plus
+ 
+   ! RTA-only version of Ind_minus.
+   subroutine RTA_minus(mm,energy,velocity,eigenvect,Nlist,List,&
+        Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+-       Gamma_minus,WP3_minus,Gamma_minus_N,Gamma_minus_U)
++       Gamma_minus,WP3_minus,Gamma_minus_N,Gamma_minus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -1362,11 +1396,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_minus,WP3_minus
+     real(kind=8),intent(out) :: Gamma_minus_N,Gamma_minus_U
++    real(kind=8),intent(out) :: Gamma_ao(4)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),i,j,k,N_minus_count
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss
++    integer(kind=4) :: ii,jj,kk,ll,ss,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime
+     real(kind=8) ::  omega,omegap,omegadp
+@@ -1377,6 +1412,7 @@
+     Gamma_minus=0.d00
+     Gamma_minus_N=0.d00
+     Gamma_minus_U=0.d00
++    Gamma_ao=0.d00
+     WP3_minus=0.d00
+ 
+     do ii=0,Ngrid(1)-1
+@@ -1420,6 +1456,9 @@
+                            realqprime,realqdprime,eigenvect,&
+                            Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k)
+                       Gamma_minus=Gamma_minus+hbarp*pi/4.d0*WP3*abs(Vp)**2
++                      nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)
++                      ao_channel=4-nacoustic
++                      Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*pi/4.d0*WP3*abs(Vp)**2
+                      !---------------------------Normal and Umklapp scattering rates---------------------------
+                      !-------- call ws_cell function to distinguish normal and umklapp processes
+                      call ws_cell(q,shortest_q)
+@@ -1447,13 +1486,14 @@
+     Gamma_minus=Gamma_minus*5.60626442*1.d8/nptk
+     Gamma_minus_N=Gamma_minus_N*5.60626442*1.d8/nptk
+     Gamma_minus_U=Gamma_minus_U*5.60626442*1.d8/nptk
++    Gamma_ao=Gamma_ao*5.60626442*1.d8/nptk
+ 
+   end subroutine RTA_minus
+ 
+   ! RTA-only version of Ind_plus using sampling method.
+   subroutine RTA_plus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+        Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+-       Gamma_plus,WP3_plus,Gamma_plus_N,Gamma_plus_U)
++       Gamma_plus,WP3_plus,Gamma_plus_N,Gamma_plus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -1463,11 +1503,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_plus,WP3_plus
+     real(kind=8),intent(out) :: Gamma_plus_N,Gamma_plus_U
++    real(kind=8),intent(out) :: Gamma_ao(4)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),i,j,k
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss
++    integer(kind=4) :: ii,jj,kk,ll,ss,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime
+     real(kind=8) :: omega,omegap,omegadp
+@@ -1483,6 +1524,7 @@
+     Gamma_plus=0.d00
+     Gamma_plus_N=0.d00
+     Gamma_plus_U=0.d00
++    Gamma_ao=0.d00
+ 
+     WP3_plus=0.d00
+   
+@@ -1541,6 +1583,9 @@
+                   realqprime,realqdprime,eigenvect,&
+                   Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k)
+                Gamma_plus=Gamma_plus+hbarp*pi/4.d0*WP3*abs(Vp)**2
++               nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)
++               ao_channel=4-nacoustic
++               Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*pi/4.d0*WP3*abs(Vp)**2
+                !======================Normal and Umklapp scattering===========================
+                !-------- call ws_cell function to distinguish normal and umklapp processes
+                call ws_cell(q,shortest_q)
+@@ -1566,18 +1611,20 @@
+     Gamma_plus = Gamma_plus*Nbands*nptk*Nbands/num_sample_process_3ph
+     Gamma_plus_N = Gamma_plus_N*Nbands*nptk*Nbands/num_sample_process_3ph
+     Gamma_plus_U = Gamma_plus_U*Nbands*nptk*Nbands/num_sample_process_3ph
++    Gamma_ao = Gamma_ao*Nbands*nptk*Nbands/num_sample_process_3ph
+     WP3_plus=WP3_plus*Nbands*nptk*Nbands/num_sample_process_3ph
+    ! ----------- end sampling method add -----------
+ 
+     Gamma_plus=Gamma_plus*5.60626442*1.d8/nptk ! THz
+     Gamma_plus_N=Gamma_plus_N*5.60626442*1.d8/nptk ! THz
+     Gamma_plus_U=Gamma_plus_U*5.60626442*1.d8/nptk ! THz
++    Gamma_ao=Gamma_ao*5.60626442*1.d8/nptk ! THz
+   end subroutine RTA_plus_sample
+ 
+   ! RTA-only version of Ind_minus using sampling method.
+   subroutine RTA_minus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+        Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+-       Gamma_minus,WP3_minus,Gamma_minus_N,Gamma_minus_U)
++       Gamma_minus,WP3_minus,Gamma_minus_N,Gamma_minus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -1587,11 +1634,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_minus,WP3_minus
+     real(kind=8),intent(out) :: Gamma_minus_N,Gamma_minus_U
++    real(kind=8),intent(out) :: Gamma_ao(4)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),i,j,k,N_minus_count
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss
++    integer(kind=4) :: ii,jj,kk,ll,ss,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime
+     real(kind=8) ::  omega,omegap,omegadp
+@@ -1607,6 +1655,7 @@
+     Gamma_minus=0.d00
+     Gamma_minus_N=0.d00
+     Gamma_minus_U=0.d00
++    Gamma_ao=0.d00
+     WP3_minus=0.d00
+ 
+     do ii=0,Ngrid(1)-1
+@@ -1663,6 +1712,9 @@
+                   realqprime,realqdprime,eigenvect,&
+                   Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k)
+                Gamma_minus=Gamma_minus+hbarp*pi/4.d0*WP3*abs(Vp)**2
++               nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)
++               ao_channel=4-nacoustic
++               Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*pi/4.d0*WP3*abs(Vp)**2
+             !---------------------------Normal and Umklapp scattering rates---------------------------
+             !-------- call ws_cell function to distinguish normal and umklapp processes
+             call ws_cell(q,shortest_q)
+@@ -1689,12 +1741,14 @@
+     Gamma_minus = Gamma_minus*Nbands*nptk*Nbands/num_sample_process_3ph
+     Gamma_minus_N = Gamma_minus_N*Nbands*nptk*Nbands/num_sample_process_3ph
+     Gamma_minus_U = Gamma_minus_U*Nbands*nptk*Nbands/num_sample_process_3ph
++    Gamma_ao = Gamma_ao*Nbands*nptk*Nbands/num_sample_process_3ph
+     WP3_minus = WP3_minus*Nbands*nptk*Nbands/num_sample_process_3ph
+    ! ----------- end sampling method add -----------
+ 
+     Gamma_minus=Gamma_minus*5.60626442*1.d8/nptk
+     Gamma_minus_N=Gamma_minus_N*5.60626442*1.d8/nptk
+     Gamma_minus_U=Gamma_minus_U*5.60626442*1.d8/nptk
++    Gamma_ao=Gamma_ao*5.60626442*1.d8/nptk
+ 
+   end subroutine RTA_minus_sample
+ 
+@@ -1728,12 +1782,14 @@
+     integer(kind=4) :: ll
+     integer(kind=4) :: mm
+     real(kind=8) :: Gamma_plus,Gamma_minus
++    real(kind=8) :: Gamma_plus_ao(4),Gamma_minus_ao(4)
+     real(kind=8) :: Gamma_plus_N,Gamma_minus_N,Gamma_plus_U,Gamma_minus_U
+     real(kind=8) :: rate_scatt_plus_reduce(Nbands,Nlist),rate_scatt_minus_reduce(Nbands,Nlist)
+     real(kind=8) :: rate_scatt_plus_reduce_N(Nbands,Nlist),rate_scatt_minus_reduce_N(Nbands,Nlist)
+     real(kind=8) :: rate_scatt_plus_reduce_U(Nbands,Nlist),rate_scatt_minus_reduce_U(Nbands,Nlist) 
+     real(kind=8) :: WP3_plus_reduce(Nbands*Nlist)
+     real(kind=8) :: WP3_minus_reduce(Nbands*Nlist)
++    real(kind=8) :: rate_scatt_ao3_reduce(4,Nbands,Nlist)
+ 
+ 
+     rate_scatt=0.d00
+@@ -1747,6 +1803,10 @@
+     WP3_minus=0.d00
+     WP3_plus_reduce=0.d00
+     WP3_minus_reduce=0.d00
++    rate_scatt_ao3_reduce=0.d00
++    if (allocated(rate_scatt_ao3)) deallocate(rate_scatt_ao3)
++    allocate(rate_scatt_ao3(4,Nbands,Nlist))
++    rate_scatt_ao3=0.d00
+ 
+ 
+     do mm=myid+1,Nbands*NList,numprocs
+@@ -1757,30 +1817,32 @@
+             call RTA_plus(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+                   Gamma_plus,WP3_plus_reduce(mm),&
+-                  Gamma_plus_N,Gamma_plus_U)
++                  Gamma_plus_N,Gamma_plus_U,Gamma_plus_ao)
+             rate_scatt_plus_reduce(i,ll)=Gamma_plus
+             rate_scatt_plus_reduce_N(i,ll)=Gamma_plus_N
+             rate_scatt_plus_reduce_U(i,ll)=Gamma_plus_U
+             call RTA_minus(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+-                  Gamma_minus,WP3_minus_reduce(mm),Gamma_minus_N,Gamma_minus_U)
++                  Gamma_minus,WP3_minus_reduce(mm),Gamma_minus_N,Gamma_minus_U,Gamma_minus_ao)
+             rate_scatt_minus_reduce(i,ll)=Gamma_minus*5.D-1
+             rate_scatt_minus_reduce_N(i,ll)=Gamma_minus_N*5.D-1
+             rate_scatt_minus_reduce_U(i,ll)=Gamma_minus_U*5.D-1
++            rate_scatt_ao3_reduce(:,i,ll)=Gamma_plus_ao+Gamma_minus_ao*5.d-1
+          else ! do sampling method
+             call RTA_plus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+                   Gamma_plus,WP3_plus_reduce(mm),&
+-                  Gamma_plus_N,Gamma_plus_U)
++                  Gamma_plus_N,Gamma_plus_U,Gamma_plus_ao)
+             rate_scatt_plus_reduce(i,ll)=Gamma_plus
+             rate_scatt_plus_reduce_N(i,ll)=Gamma_plus_N
+             rate_scatt_plus_reduce_U(i,ll)=Gamma_plus_U
+             call RTA_minus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,Index_i,Index_j,Index_k,IJK,&
+-                  Gamma_minus,WP3_minus_reduce(mm),Gamma_minus_N,Gamma_minus_U)
++                  Gamma_minus,WP3_minus_reduce(mm),Gamma_minus_N,Gamma_minus_U,Gamma_minus_ao)
+             rate_scatt_minus_reduce(i,ll)=Gamma_minus*5.D-1
+             rate_scatt_minus_reduce_N(i,ll)=Gamma_minus_N*5.D-1
+             rate_scatt_minus_reduce_U(i,ll)=Gamma_minus_U*5.D-1
++            rate_scatt_ao3_reduce(:,i,ll)=Gamma_plus_ao+Gamma_minus_ao*5.d-1
+ 
+          endif
+ 
+@@ -1803,6 +1865,8 @@
+          MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,mm)
+     call MPI_ALLREDUCE(WP3_minus_reduce,WP3_minus,Nbands*Nlist,&
+          MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,mm)
++    call MPI_ALLREDUCE(rate_scatt_ao3_reduce,rate_scatt_ao3,4*Nbands*Nlist,&
++         MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,mm)
+ 
+     rate_scatt=rate_scatt_plus+rate_scatt_minus
+   end subroutine RTA_driver
+@@ -2370,7 +2434,7 @@
+   ! RTA-only version of 4ph ++ process, Ind_plusplus; Avoid double counting
+   subroutine RTA_plusplus(mm,energy,velocity,eigenvect,Nlist,List,&
+       Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-      Gamma_plusplus,WP4_plusplus,Gamma_plusplus_N,Gamma_plusplus_U)
++      Gamma_plusplus,WP4_plusplus,Gamma_plusplus_N,Gamma_plusplus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -2380,11 +2444,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_plusplus,WP4_plusplus
+     real(kind=8),intent(out) :: Gamma_plusplus_N,Gamma_plusplus_U
++    real(kind=8),intent(out) :: Gamma_ao(5)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3),shortest_qtprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),qtprime(3),i,j,k,l
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch
++    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime,fBEtprime
+     real(kind=8) :: omega,omegap,omegadp,omegatp
+@@ -2395,6 +2460,7 @@
+     Gamma_plusplus=0.d00
+     Gamma_plusplus_N=0.d00
+     Gamma_plusplus_U=0.d00
++    Gamma_ao=0.d00
+     WP4_plusplus=0.d00
+     do ii=0,Ngrid(1)-1
+        do jj=0,Ngrid(2)-1
+@@ -2452,6 +2518,9 @@
+                                                 realqprime,realqdprime,realqtprime,eigenvect,&
+                                                 Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l)
+                                        Gamma_plusplus=Gamma_plusplus+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
++                                       nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)+merge(1,0,l.le.3)
++                                       ao_channel=5-nacoustic
++                                       Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
+                                        !========Normal and Umklapp scattering========
+                                        call ws_cell(q,shortest_q)
+                                        call ws_cell(qprime,shortest_qprime)
+@@ -2481,13 +2550,14 @@
+     Gamma_plusplus=Gamma_plusplus*3.37617087*1.d9/nptk/nptk
+     Gamma_plusplus_N=Gamma_plusplus_N*3.37617087*1.d9/nptk/nptk
+     Gamma_plusplus_U=Gamma_plusplus_U*3.37617087*1.d9/nptk/nptk
++    Gamma_ao=Gamma_ao*3.37617087*1.d9/nptk/nptk
+ 
+   end subroutine
+ 
+   ! RTA-only version of 4ph +- process, Ind_plusminus
+   subroutine RTA_plusminus(mm,energy,velocity,eigenvect,Nlist,List,&
+       Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-      Gamma_plusminus,WP4_plusminus,Gamma_plusminus_N,Gamma_plusminus_U)
++      Gamma_plusminus,WP4_plusminus,Gamma_plusminus_N,Gamma_plusminus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -2497,11 +2567,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_plusminus,WP4_plusminus
+     real(kind=8),intent(out) :: Gamma_plusminus_N,Gamma_plusminus_U
++    real(kind=8),intent(out) :: Gamma_ao(5)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3),shortest_qtprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),qtprime(3),i,j,k,l
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch
++    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime,fBEtprime
+     real(kind=8) :: omega,omegap,omegadp,omegatp
+@@ -2512,6 +2583,7 @@
+     Gamma_plusminus=0.d00
+     Gamma_plusminus_N=0.d00
+     Gamma_plusminus_U=0.d00
++    Gamma_ao=0.d00
+     WP4_plusminus=0.d00
+     do ii=0,Ngrid(1)-1
+        do jj=0,Ngrid(2)-1
+@@ -2571,6 +2643,9 @@
+                                                    realqprime,realqdprime,realqtprime,eigenvect,&
+                                                    Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l)
+                                           Gamma_plusminus=Gamma_plusminus+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
++                                          nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)+merge(1,0,l.le.3)
++                                          ao_channel=5-nacoustic
++                                          Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
+                                           !========Normal and Umklapp scattering========
+                                           call ws_cell(q,shortest_q)
+                                           call ws_cell(qprime,shortest_qprime)
+@@ -2602,13 +2677,14 @@
+     Gamma_plusminus=Gamma_plusminus*3.37617087*1.d9/nptk/nptk
+     Gamma_plusminus_N=Gamma_plusminus_N*3.37617087*1.d9/nptk/nptk
+     Gamma_plusminus_U=Gamma_plusminus_U*3.37617087*1.d9/nptk/nptk
++    Gamma_ao=Gamma_ao*3.37617087*1.d9/nptk/nptk
+ 
+   end subroutine
+ 
+   ! RTA-only version of 4ph -- process, Ind_minusminus
+   subroutine RTA_minusminus(mm,energy,velocity,eigenvect,Nlist,List,&
+       Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-      Gamma_minusminus,WP4_minusminus,Gamma_minusminus_N,Gamma_minusminus_U)
++      Gamma_minusminus,WP4_minusminus,Gamma_minusminus_N,Gamma_minusminus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -2618,11 +2694,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_minusminus,WP4_minusminus
+     real(kind=8),intent(out) :: Gamma_minusminus_N,Gamma_minusminus_U
++    real(kind=8),intent(out) :: Gamma_ao(5)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3),shortest_qtprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),qtprime(3),i,j,k,l
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch
++    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime,fBEtprime
+     real(kind=8) :: omega,omegap,omegadp,omegatp
+@@ -2633,6 +2710,7 @@
+     Gamma_minusminus=0.d00
+     Gamma_minusminus_N=0.d00
+     Gamma_minusminus_U=0.d00
++    Gamma_ao=0.d00
+     WP4_minusminus=0.d00
+     do ii=0,Ngrid(1)-1
+        do jj=0,Ngrid(2)-1
+@@ -2692,6 +2770,9 @@
+                                                 realqprime,realqdprime,realqtprime,eigenvect,&
+                                                 Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l)
+                                        Gamma_minusminus=Gamma_minusminus+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
++                                       nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)+merge(1,0,l.le.3)
++                                       ao_channel=5-nacoustic
++                                       Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
+                                        !========Normal and Umklapp scattering========
+                                        call ws_cell(q,shortest_q)
+                                        call ws_cell(qprime,shortest_qprime)
+@@ -2722,12 +2803,13 @@
+     Gamma_minusminus=Gamma_minusminus*3.37617087*1.d9/nptk/nptk
+     Gamma_minusminus_N=Gamma_minusminus_N*3.37617087*1.d9/nptk/nptk
+     Gamma_minusminus_U=Gamma_minusminus_U*3.37617087*1.d9/nptk/nptk
++    Gamma_ao=Gamma_ao*3.37617087*1.d9/nptk/nptk
+ 
+   end subroutine
+   ! RTA-only version of 4ph ++ process using sampling method, Ind_plusplus; Avoid double counting
+   subroutine RTA_plusplus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+       Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-      Gamma_plusplus,WP4_plusplus,Gamma_plusplus_N,Gamma_plusplus_U)
++      Gamma_plusplus,WP4_plusplus,Gamma_plusplus_N,Gamma_plusplus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -2737,11 +2819,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_plusplus,WP4_plusplus
+     real(kind=8),intent(out) :: Gamma_plusplus_N,Gamma_plusplus_U
++    real(kind=8),intent(out) :: Gamma_ao(5)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3),shortest_qtprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),qtprime(3),i,j,k,l
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch
++    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime,fBEtprime
+     real(kind=8) :: omega,omegap,omegadp,omegatp
+@@ -2759,6 +2842,7 @@
+     Gamma_plusplus=0.d00
+     Gamma_plusplus_N=0.d00
+     Gamma_plusplus_U=0.d00
++    Gamma_ao=0.d00
+     WP4_plusplus=0.d00
+     do ii=0,Ngrid(1)-1
+        do jj=0,Ngrid(2)-1
+@@ -2828,6 +2912,9 @@
+                               realqprime,realqdprime,realqtprime,eigenvect,&
+                               Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l)
+                      Gamma_plusplus=Gamma_plusplus+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
++                     nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)+merge(1,0,l.le.3)
++                     ao_channel=5-nacoustic
++                     Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
+                      !========Normal and Umklapp scattering========
+                      call ws_cell(q,shortest_q)
+                      call ws_cell(qprime,shortest_qprime)
+@@ -2852,11 +2939,13 @@
+     Gamma_plusplus=Gamma_plusplus*3.37617087*1.d9/nptk/nptk
+     Gamma_plusplus_N=Gamma_plusplus_N*3.37617087*1.d9/nptk/nptk
+     Gamma_plusplus_U=Gamma_plusplus_U*3.37617087*1.d9/nptk/nptk
++    Gamma_ao=Gamma_ao*3.37617087*1.d9/nptk/nptk
+ 
+    ! ----------- sampling method add -----------
+    Gamma_plusplus = Gamma_plusplus/num_sample_process_4ph*total_process  
+    Gamma_plusplus_N = Gamma_plusplus_N*total_process/num_sample_process_4ph
+    Gamma_plusplus_U = Gamma_plusplus_U*total_process/num_sample_process_4ph
++   Gamma_ao = Gamma_ao*total_process/num_sample_process_4ph
+    WP4_plusplus = WP4_plusplus*total_process/num_sample_process_4ph
+    ! ----------- end sampling method add -----------
+ 
+@@ -2866,7 +2955,7 @@
+   ! RTA-only version of 4ph +- process using sampling method, Ind_plusminus
+   subroutine RTA_plusminus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+       Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-      Gamma_plusminus,WP4_plusminus,Gamma_plusminus_N,Gamma_plusminus_U)
++      Gamma_plusminus,WP4_plusminus,Gamma_plusminus_N,Gamma_plusminus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -2876,11 +2965,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_plusminus,WP4_plusminus
+     real(kind=8),intent(out) :: Gamma_plusminus_N,Gamma_plusminus_U
++    real(kind=8),intent(out) :: Gamma_ao(5)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3),shortest_qtprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),qtprime(3),i,j,k,l
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch
++    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch,ao_channel,nacoustic
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime,fBEtprime
+     real(kind=8) :: omega,omegap,omegadp,omegatp
+@@ -2898,6 +2988,7 @@
+     Gamma_plusminus=0.d00
+     Gamma_plusminus_N=0.d00
+     Gamma_plusminus_U=0.d00
++    Gamma_ao=0.d00
+     WP4_plusminus=0.d00
+     do ii=0,Ngrid(1)-1
+        do jj=0,Ngrid(2)-1
+@@ -2967,6 +3058,9 @@
+                                  realqprime,realqdprime,realqtprime,eigenvect,&
+                                  Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l)
+                         Gamma_plusminus=Gamma_plusminus+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
++                        nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)+merge(1,0,l.le.3)
++                        ao_channel=5-nacoustic
++                        Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
+                         !========Normal and Umklapp scattering========
+                         call ws_cell(q,shortest_q)
+                         call ws_cell(qprime,shortest_qprime)
+@@ -2993,11 +3087,13 @@
+     Gamma_plusminus=Gamma_plusminus*3.37617087*1.d9/nptk/nptk
+     Gamma_plusminus_N=Gamma_plusminus_N*3.37617087*1.d9/nptk/nptk
+     Gamma_plusminus_U=Gamma_plusminus_U*3.37617087*1.d9/nptk/nptk
++    Gamma_ao=Gamma_ao*3.37617087*1.d9/nptk/nptk
+ 
+    ! ----------- sampling method add -----------
+    Gamma_plusminus = Gamma_plusminus/num_sample_process_4ph*total_process    
+    Gamma_plusminus_N = Gamma_plusminus_N*total_process/num_sample_process_4ph
+    Gamma_plusminus_U = Gamma_plusminus_U*total_process/num_sample_process_4ph
++   Gamma_ao = Gamma_ao*total_process/num_sample_process_4ph
+    WP4_plusminus = WP4_plusminus*total_process/num_sample_process_4ph
+    ! ----------- end sampling method add -----------
+ 
+@@ -3007,7 +3103,7 @@
+   ! RTA-only version of 4ph -- process using sampling method, Ind_minusminus
+   subroutine RTA_minusminus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+       Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-      Gamma_minusminus,WP4_minusminus,Gamma_minusminus_N,Gamma_minusminus_U)
++      Gamma_minusminus,WP4_minusminus,Gamma_minusminus_N,Gamma_minusminus_U,Gamma_ao)
+     implicit none
+ 
+     integer(kind=4),intent(in) :: mm,NList,List(Nlist),IJK(3,nptk),Ntri
+@@ -3017,11 +3113,12 @@
+     complex(kind=8),intent(in) :: eigenvect(nptk,Nbands,Nbands)
+     real(kind=8),intent(out) :: Gamma_minusminus,WP4_minusminus
+     real(kind=8),intent(out) :: Gamma_minusminus_N,Gamma_minusminus_U
++    real(kind=8),intent(out) :: Gamma_ao(5)
+     real(kind=8) :: shortest_q(3),shortest_qprime(3),shortest_qdprime(3),shortest_qtprime(3)
+ 
+     integer(kind=4) :: q(3),qprime(3),qdprime(3),qtprime(3),i,j,k,l
+     integer(kind=4) :: Index_N(0:(Ngrid(1)-1),0:(Ngrid(2)-1),0:(Ngrid(3)-1))
+-    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch1,startbranch2 ! Ziqi add
++    integer(kind=4) :: ii,jj,kk,ll,ss,startbranch1,startbranch2,ao_channel,nacoustic ! Ziqi add
+     real(kind=8) :: sigma
+     real(kind=8) :: fBEprime,fBEdprime,fBEtprime
+     real(kind=8) :: omega,omegap,omegadp,omegatp
+@@ -3039,6 +3136,7 @@
+     Gamma_minusminus=0.d00
+     Gamma_minusminus_N=0.d00
+     Gamma_minusminus_U=0.d00
++    Gamma_ao=0.d00
+     WP4_minusminus=0.d00
+     do ii=0,Ngrid(1)-1
+        do jj=0,Ngrid(2)-1
+@@ -3110,6 +3208,9 @@
+                               realqprime,realqdprime,realqtprime,eigenvect,&
+                               Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l)
+                      Gamma_minusminus=Gamma_minusminus+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
++                     nacoustic=merge(1,0,i.le.3)+merge(1,0,j.le.3)+merge(1,0,k.le.3)+merge(1,0,l.le.3)
++                     ao_channel=5-nacoustic
++                     Gamma_ao(ao_channel)=Gamma_ao(ao_channel)+hbarp*hbarp*pi/8.d0*WP4*abs(Vp)**2
+                      !========Normal and Umklapp scattering========
+                      call ws_cell(q,shortest_q)
+                      call ws_cell(qprime,shortest_qprime)
+@@ -3135,11 +3236,13 @@
+     Gamma_minusminus=Gamma_minusminus*3.37617087*1.d9/nptk/nptk
+     Gamma_minusminus_N=Gamma_minusminus_N*3.37617087*1.d9/nptk/nptk
+     Gamma_minusminus_U=Gamma_minusminus_U*3.37617087*1.d9/nptk/nptk
++    Gamma_ao=Gamma_ao*3.37617087*1.d9/nptk/nptk
+ 
+    ! ----------- sampling method add -----------
+    Gamma_minusminus = Gamma_minusminus/num_sample_process_4ph*total_process  
+    Gamma_minusminus_N = Gamma_minusminus_N*total_process/num_sample_process_4ph
+    Gamma_minusminus_U = Gamma_minusminus_U*total_process/num_sample_process_4ph
++   Gamma_ao = Gamma_ao*total_process/num_sample_process_4ph
+    WP4_minusminus = WP4_minusminus*total_process/num_sample_process_4ph
+    ! ----------- end sampling method add -----------
+ 
+@@ -3182,11 +3285,13 @@
+     integer(kind=4) :: ll
+     integer(kind=4) :: mm
+     real(kind=8) :: Gamma_plusplus,Gamma_plusminus,Gamma_minusminus
++    real(kind=8) :: Gamma_plusplus_ao(5),Gamma_plusminus_ao(5),Gamma_minusminus_ao(5)
+     real(kind=8) :: Gamma_plusplus_N,Gamma_plusminus_N,Gamma_minusminus_N,Gamma_plusplus_U,Gamma_plusminus_U,Gamma_minusminus_U
+     real(kind=8) :: rate_scatt_plusplus_reduce(Nbands,Nlist),rate_scatt_plusminus_reduce(Nbands,Nlist),rate_scatt_minusminus_reduce(Nbands,Nlist)
+     real(kind=8) :: rate_scatt_plusplus_reduce_N(Nbands,Nlist),rate_scatt_plusminus_reduce_N(Nbands,Nlist),rate_scatt_minusminus_reduce_N(Nbands,Nlist)
+     real(kind=8) :: rate_scatt_plusplus_reduce_U(Nbands,Nlist),rate_scatt_plusminus_reduce_U(Nbands,Nlist),rate_scatt_minusminus_reduce_U(Nbands,Nlist) 
+     real(kind=8) :: WP4_plusplus_reduce(Nbands*Nlist),WP4_plusminus_reduce(Nbands*Nlist),WP4_minusminus_reduce(Nbands*Nlist)
++    real(kind=8) :: rate_scatt_ao4_reduce(5,Nbands,Nlist)
+ 
+     rate_scatt_4ph=0.d00
+     rate_scatt_plusplus_reduce=0.d00
+@@ -3208,6 +3313,10 @@
+     WP4_plusplus_reduce=0.d00
+     WP4_plusminus_reduce=0.d00
+     WP4_minusminus_reduce=0.d00
++    rate_scatt_ao4_reduce=0.d00
++    if (allocated(rate_scatt_ao4)) deallocate(rate_scatt_ao4)
++    allocate(rate_scatt_ao4(5,Nbands,Nlist))
++    rate_scatt_ao4=0.d00
+ 
+     do mm=myid+1,Nbands*NList,numprocs
+        i=modulo(mm-1,Nbands)+1
+@@ -3216,41 +3325,43 @@
+          if (num_sample_process_4ph==-1) then ! do not sample
+             call RTA_plusplus(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-                  Gamma_plusplus,WP4_plusplus_reduce(mm),Gamma_plusplus_N,Gamma_plusplus_U)
++                  Gamma_plusplus,WP4_plusplus_reduce(mm),Gamma_plusplus_N,Gamma_plusplus_U,Gamma_plusplus_ao)
+             rate_scatt_plusplus_reduce(i,ll)=Gamma_plusplus
+             rate_scatt_plusplus_reduce_N(i,ll)=Gamma_plusplus_N
+             rate_scatt_plusplus_reduce_U(i,ll)=Gamma_plusplus_U
+             call RTA_plusminus(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-                  Gamma_plusminus,WP4_plusminus_reduce(mm),Gamma_plusminus_N,Gamma_plusminus_U)
++                  Gamma_plusminus,WP4_plusminus_reduce(mm),Gamma_plusminus_N,Gamma_plusminus_U,Gamma_plusminus_ao)
+             rate_scatt_plusminus_reduce(i,ll)=Gamma_plusminus
+             rate_scatt_plusminus_reduce_N(i,ll)=Gamma_plusminus_N
+             rate_scatt_plusminus_reduce_U(i,ll)=Gamma_plusminus_U
+             call RTA_minusminus(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-                  Gamma_minusminus,WP4_minusminus_reduce(mm),Gamma_minusminus_N,Gamma_minusminus_U)
++                  Gamma_minusminus,WP4_minusminus_reduce(mm),Gamma_minusminus_N,Gamma_minusminus_U,Gamma_minusminus_ao)
+             rate_scatt_minusminus_reduce(i,ll)=Gamma_minusminus
+             rate_scatt_minusminus_reduce_N(i,ll)=Gamma_minusminus_N
+             rate_scatt_minusminus_reduce_U(i,ll)=Gamma_minusminus_U
++            rate_scatt_ao4_reduce(:,i,ll)=Gamma_plusplus_ao+Gamma_plusminus_ao+Gamma_minusminus_ao
+          else ! do sampling method
+             call RTA_plusplus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-                  Gamma_plusplus,WP4_plusplus_reduce(mm),Gamma_plusplus_N,Gamma_plusplus_U)
++                  Gamma_plusplus,WP4_plusplus_reduce(mm),Gamma_plusplus_N,Gamma_plusplus_U,Gamma_plusplus_ao)
+             rate_scatt_plusplus_reduce(i,ll)=Gamma_plusplus
+             rate_scatt_plusplus_reduce_N(i,ll)=Gamma_plusplus_N
+             rate_scatt_plusplus_reduce_U(i,ll)=Gamma_plusplus_U
+             call RTA_plusminus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-                  Gamma_plusminus,WP4_plusminus_reduce(mm),Gamma_plusminus_N,Gamma_plusminus_U)
++                  Gamma_plusminus,WP4_plusminus_reduce(mm),Gamma_plusminus_N,Gamma_plusminus_U,Gamma_plusminus_ao)
+             rate_scatt_plusminus_reduce(i,ll)=Gamma_plusminus
+             rate_scatt_plusminus_reduce_N(i,ll)=Gamma_plusminus_N
+             rate_scatt_plusminus_reduce_U(i,ll)=Gamma_plusminus_U
+             call RTA_minusminus_sample(mm,energy,velocity,eigenvect,Nlist,List,&
+                   Ntri,Phi,R_j,R_k,R_l,Index_i,Index_j,Index_k,Index_l,IJK,&
+-                  Gamma_minusminus,WP4_minusminus_reduce(mm),Gamma_minusminus_N,Gamma_minusminus_U)
++                  Gamma_minusminus,WP4_minusminus_reduce(mm),Gamma_minusminus_N,Gamma_minusminus_U,Gamma_minusminus_ao)
+             rate_scatt_minusminus_reduce(i,ll)=Gamma_minusminus
+             rate_scatt_minusminus_reduce_N(i,ll)=Gamma_minusminus_N
+             rate_scatt_minusminus_reduce_U(i,ll)=Gamma_minusminus_U
++            rate_scatt_ao4_reduce(:,i,ll)=Gamma_plusplus_ao+Gamma_plusminus_ao+Gamma_minusminus_ao
+          endif
+ 
+        endif
+@@ -3283,6 +3394,8 @@
+          MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,mm)
+     call MPI_ALLREDUCE(WP4_minusminus_reduce,WP4_minusminus,Nbands*Nlist,&
+          MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,mm)
++    call MPI_ALLREDUCE(rate_scatt_ao4_reduce,rate_scatt_ao4,5*Nbands*Nlist,&
++         MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,mm)
+ 
+     rate_scatt_4ph=rate_scatt_plusplus+rate_scatt_plusminus+rate_scatt_minusminus
+   end subroutine RTA_driver_4ph
+--- a/Src/ShengBTE.f90
++++ b/Src/ShengBTE.f90
+@@ -96,6 +97,8 @@
+   integer(kind=4),allocatable :: Indof2ndPhonon_plus(:),Indof3rdPhonon_plus(:)
+   integer(kind=4),allocatable :: Indof2ndPhonon_minus(:),Indof3rdPhonon_minus(:)
+   real(kind=8) :: radnw,kappa_or_old
++  real(kind=8) :: ao_sum,ao_abs_residual,ao_rel_residual
++  real(kind=8) :: ao3_max_abs,ao3_max_rel,ao4_max_abs,ao4_max_rel
+   real(kind=8),allocatable :: Gamma_plus(:),Gamma_minus(:),Gamma_plus_N(:),Gamma_minus_N(:),Gamma_plus_U(:),Gamma_minus_U(:)
+   real(kind=8),allocatable :: Pspace_plus_total(:,:)
+   real(kind=8),allocatable :: Pspace_minus_total(:,:)
+@@ -995,6 +1025,72 @@
+             end if
+         end if
+      end if
++
++     ! Write acoustic/optical composition-resolved RTA scattering rates and
++     ! per-mode closure diagnostics.  These arrays are instrumentation only;
++     ! they are not used in BTE.w, lifetimes, iterations, or conductivity.
++     if(myid.eq.0) then
++        ao3_max_abs=0.d0
++        ao3_max_rel=0.d0
++        ao4_max_abs=0.d0
++        ao4_max_rel=0.d0
++        if (allocated(rate_scatt_ao3)) then
++           open(71,file="BTE.Scatt3_AAA",status="replace")
++           open(72,file="BTE.Scatt3_AAO",status="replace")
++           open(73,file="BTE.Scatt3_AOO",status="replace")
++           open(74,file="BTE.Scatt3_OOO",status="replace")
++           open(75,file="BTE.Scatt3_closure",status="replace")
++           do i=1,Nbands
++              do ll=1,Nlist
++                 mm=(ll-1)*Nbands+i
++                 write(71,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao3(1,i,ll)
++                 write(72,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao3(2,i,ll)
++                 write(73,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao3(3,i,ll)
++                 write(74,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao3(4,i,ll)
++                 ao_sum=sum(rate_scatt_ao3(:,i,ll))
++                 ao_abs_residual=rate_scatt(i,ll)-ao_sum
++                 ao_rel_residual=abs(ao_abs_residual)/max(abs(rate_scatt(i,ll)),tiny(1.d0))
++                 ao3_max_abs=max(ao3_max_abs,abs(ao_abs_residual))
++                 ao3_max_rel=max(ao3_max_rel,ao_rel_residual)
++                 write(75,"(3I10,5E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt(i,ll),ao_sum,&
++                      ao_abs_residual,ao_rel_residual
++              end do
++           end do
++           close(71); close(72); close(73); close(74); close(75)
++        end if
++        if (allocated(rate_scatt_ao4)) then
++           open(81,file="BTE.Scatt4_AAAA",status="replace")
++           open(82,file="BTE.Scatt4_AAAO",status="replace")
++           open(83,file="BTE.Scatt4_AAOO",status="replace")
++           open(84,file="BTE.Scatt4_AOOO",status="replace")
++           open(85,file="BTE.Scatt4_OOOO",status="replace")
++           open(86,file="BTE.Scatt4_closure",status="replace")
++           do i=1,Nbands
++              do ll=1,Nlist
++                 mm=(ll-1)*Nbands+i
++                 write(81,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao4(1,i,ll)
++                 write(82,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao4(2,i,ll)
++                 write(83,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao4(3,i,ll)
++                 write(84,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao4(4,i,ll)
++                 write(85,"(3I10,2E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_ao4(5,i,ll)
++                 ao_sum=sum(rate_scatt_ao4(:,i,ll))
++                 ao_abs_residual=rate_scatt_4ph(i,ll)-ao_sum
++                 ao_rel_residual=abs(ao_abs_residual)/max(abs(rate_scatt_4ph(i,ll)),tiny(1.d0))
++                 ao4_max_abs=max(ao4_max_abs,abs(ao_abs_residual))
++                 ao4_max_rel=max(ao4_max_rel,ao_rel_residual)
++                 write(86,"(3I10,5E24.14)") mm,list(ll),i,energy(list(ll),i),rate_scatt_4ph(i,ll),ao_sum,&
++                      ao_abs_residual,ao_rel_residual
++              end do
++           end do
++           close(81); close(82); close(83); close(84); close(85); close(86)
++        end if
++        open(87,file="BTE.Scatt_AO_closure_summary",status="replace")
++        write(87,"(A,2E24.14)") "3ph max_abs max_rel ",ao3_max_abs,ao3_max_rel
++        write(87,"(A,2E24.14)") "4ph max_abs max_rel ",ao4_max_abs,ao4_max_rel
++        close(87)
++        write(*,"(A,2E14.5)") "Info: 3ph A/O closure max abs/rel = ",ao3_max_abs,ao3_max_rel
++        write(*,"(A,2E14.5)") "Info: 4ph A/O closure max abs/rel = ",ao4_max_abs,ao4_max_rel
++     end if
+      
+      ! Obtain the total scattering rates in the relaxation time approximation.
+      ! Four-phonon scattering rates are denoted rate_scatt_4ph

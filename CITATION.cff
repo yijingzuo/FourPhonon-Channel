@@ -1,0 +1,57 @@
+cff-version: 1.2.0
+message: "If you use FourPhonon-Channel, cite this software and the upstream FourPhonon and ShengBTE works listed below."
+title: "FourPhonon-Channel"
+version: 0.1.0
+date-released: 2026-10-06
+type: software
+license: GPL-3.0-only
+authors:
+  - family-names: "Zuo"
+    given-names: "Yijing"
+    orcid: "https://orcid.org/0009-0000-0576-4024"
+    email: "yijingzuo@whu.edu.cn"
+    affiliation: "Wuhan University"
+repository-code: "https://github.com/yijingzuo/FourPhonon-Channel"
+preferred-citation:
+  type: software
+  title: "FourPhonon-Channel"
+  version: 0.1.0
+  authors:
+    - family-names: "Zuo"
+      given-names: "Yijing"
+      orcid: "https://orcid.org/0009-0000-0576-4024"
+      email: "yijingzuo@whu.edu.cn"
+      affiliation: "Wuhan University"
+references:
+  - type: article
+    title: "FourPhonon: An extension module to ShengBTE for computing four-phonon scattering rates and thermal conductivity"
+    authors:
+      - family-names: Han
+        given-names: Zherui
+      - family-names: Yang
+        given-names: Xiaolong
+      - family-names: Li
+        given-names: Wu
+      - family-names: Feng
+        given-names: Tianli
+      - family-names: Ruan
+        given-names: Xiulin
+    journal: Computer Physics Communications
+    volume: 270
+    year: 2022
+    doi: 10.1016/j.cpc.2021.108179
+  - type: article
+    title: "ShengBTE: A solver of the Boltzmann transport equation for phonons"
+    authors:
+      - family-names: Li
+        given-names: Wu
+      - family-names: Carrete
+        given-names: Jesús
+      - family-names: Katcho
+        given-names: Nebil A.
+      - family-names: Mingo
+        given-names: Natalio
+    journal: Computer Physics Communications
+    volume: 185
+    year: 2014
+    doi: 10.1016/j.cpc.2014.02.015
